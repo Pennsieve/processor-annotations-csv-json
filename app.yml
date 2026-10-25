@@ -1,37 +1,28 @@
-# yaml-language-server: $schema=https://app.pennsieve.io/static/schemas/app-manifest.v1.json
-
-schemaVersion: "1.0"
-name: Annotation CSV to NDJSON
-description: >-
-  Normalises an annotation export into the interchange NDJSON the TS-Zarr
-  writer reads. Runs in a branch parallel to the signal conversion and emits
-  one file per annotation source, which the writer turns into one event
-  channel each.
-applicationType: processor
-
-categories:
-  - Format Conversion
-
-tags:
-  - annotations
-  - ndjson
-  - timeseries
-  - neurophysiology
-  - ieeg
+# yaml-language-server: $schema=https://schemas.pennsieve.io/app-manifest/v1.json
+application:
+  name: Annotation CSV to NDJSON
+  description: >-
+    Normalises an annotation export into the interchange NDJSON the TS-Zarr
+    writer reads. Runs in a branch parallel to the signal conversion and emits
+    one file per annotation source, which the writer turns into one event
+    channel each.
+  type: processor
+  tags:
+    - annotations
+    - ndjson
+    - timeseries
+    - neurophysiology
+    - ieeg
+    - conversion
 
 runtime:
-  computeTypes:
-    - standard
-  gpu:
-    enabled: false
-
-resources:
   cpu: 1024
   memory: 2048
+  computeTypes:
+    - standard
 
 inputs:
   - name: annotations
-    dataType: file
     required: true
     description: >-
       One or more CSV exports in INPUT_DIR. Every *.csv is read; the SITE
@@ -39,7 +30,6 @@ inputs:
 
 outputs:
   - name: annotations_ndjson
-    dataType: file
     description: >-
       One <channel.id>.annotations.ndjson per annotation source, written into
       OUTPUT_DIR. The stem is the channel id and must be unique across the
@@ -52,10 +42,10 @@ parameters:
     description: >-
       Which site's export rules to apply. Each site knows the quirks of one
       source; everything downstream of it is identical.
-    type: enum
-    allowedValues:
+    type: string
+    validValues:
       - ieeg
-    default: ieeg
+    defaultValue: ieeg
     required: false
 
   - name: DUPLICATE_RULE
@@ -66,13 +56,13 @@ parameters:
       dropped. first (oldest), last (newest) and widest (most channels) each
       keep one copy and discard the rest, which can lose channels the other
       copies named.
-    type: enum
-    allowedValues:
+    type: string
+    validValues:
       - exact
       - first
       - last
       - widest
-    default: exact
+    defaultValue: exact
     required: false
 
   - name: JSON_BODIES
@@ -84,7 +74,7 @@ parameters:
       description only repeats its type, which would otherwise write empty
       bodies.
     type: boolean
-    default: false
+    defaultValue: false
     required: false
 
   - name: SOURCE_PREFIX
@@ -94,5 +84,5 @@ parameters:
       more than one source, so two sites with a layer of the same name do not
       collide and fail the branch merge.
     type: string
-    default: ""
+    defaultValue: ""
     required: false
