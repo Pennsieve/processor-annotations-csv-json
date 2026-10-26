@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CSV annotations in, interchange NDJSON out.
+"""Annotation exports in, interchange NDJSON out.
 
 One processor per source format, all writing the same shape, so the TS-Zarr
 writer never learns what a Natus export or an IEEG portal is. It takes NWB plus
@@ -28,7 +28,7 @@ SITES = {"ieeg": ieeg.convert}
 
 
 def main() -> int:
-    """Convert every CSV in INPUT_DIR and return a process exit code."""
+    """Convert every export in INPUT_DIR and return a process exit code."""
     config = Config()
     input_dir = Path(config.INPUT_DIR).resolve()
     output_dir = Path(config.OUTPUT_DIR).resolve()
@@ -39,16 +39,21 @@ def main() -> int:
         log.error("unknown SITE %r; known sites: %s", config.SITE, sorted(SITES))
         return 2
 
-    csv_paths = sorted(input_dir.glob("*.csv"))
-    if not csv_paths:
-        log.error("no *.csv in %s", input_dir)
+    # Every export the site reads, whatever else the workflow put beside them.
+    paths = sorted(
+        path
+        for pattern in ("*.csv", "*.xml")
+        for path in input_dir.glob(pattern)
+    )
+    if not paths:
+        log.error("no *.csv or *.xml in %s", input_dir)
         return 2
 
-    log.info("site=%s  inputs=%d  -> %s", config.SITE, len(csv_paths), output_dir)
+    log.info("site=%s  inputs=%d  -> %s", config.SITE, len(paths), output_dir)
 
     written = 0
     seen: dict[str, Path] = {}
-    for path in csv_paths:
+    for path in paths:
         for header, marks in convert(
             path,
             duplicate_rule=config.DUPLICATE_RULE,

@@ -262,3 +262,117 @@ def test_end_to_end_on_the_measured_natus_shape(tmp_path):
     assert json.loads(json.dumps(header.as_record()))["schema"].startswith(
         "pennsieve/annotations-"
     )
+
+
+# ---- the XML export ----
+
+from processor.sites.ieeg import read_export, read_xml_rows  # noqa: E402
+
+
+def _xml(tmp_path, annotations, name="export.xml", root="annotations"):
+    """Write an export of (id, type, description, start_us, end_us) tuples."""
+    body = "".join(
+        f'  <annotation id="{id_}" type="{kind}" description="{desc}" '
+        f'startOffsetUsecs="{start}" endOffsetUsecs="{end}" '
+        f'layer="EDF Annotations">\n  </annotation>\n'
+        for id_, kind, desc, start, end in annotations
+    )
+    path = tmp_path / name
+    path.write_text(
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f"<{root}>\n{body}</{root}>\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_xml_rows_carry_the_portal_columns_and_no_channel(tmp_path):
+    path = _xml(tmp_path, [("36214912", "IMP CHECK ON", "IMP CHECK ON", 16320000, 16320000)])
+    (row,) = read_xml_rows(path)
+    assert row.annotation_id == "36214912"
+    assert row.layer == "EDF Annotations"
+    assert row.type == "IMP CHECK ON"
+    assert row.time_us == 16320000
+    assert row.duration_us == 0
+    assert row.channel == ""
+
+
+def test_xml_duration_comes_from_the_two_offsets(tmp_path):
+    path = _xml(tmp_path, [("1", "Seizure", "Seizure", 1000, 91000)])
+    (row,) = read_xml_rows(path)
+    assert row.duration_us == 90000
+
+
+def test_xml_drops_edf_timekeeping_stamps_and_says_so(tmp_path, caplog):
+    path = _xml(
+        tmp_path,
+        [
+            ("1", "+0.000000", "+0.000000", 0, 0),
+            ("2", "Segment: REC START", "Segment: REC START", 0, 0),
+            ("3", "+1.640000", "+1.640000", 1440000, 1440000),
+            ("4", "A1+A2 OFF", "A1+A2 OFF", 1440000, 1440000),
+        ],
+    )
+    with caplog.at_level("INFO"):
+        rows = list(read_xml_rows(path))
+    assert [row.type for row in rows] == ["Segment: REC START", "A1+A2 OFF"]
+    assert "dropped 2 EDF+ timekeeping stamps" in caplog.text
+
+
+def test_xml_keeps_a_numeric_type_that_carries_a_description(tmp_path):
+    """Only the bare stamp is noise; a number with a note is a mark."""
+    path = _xml(tmp_path, [("1", "+5.000000", "dose given", 5000000, 5000000)])
+    assert len(list(read_xml_rows(path))) == 1
+
+
+def test_xml_rejects_a_file_that_is_not_an_annotation_export(tmp_path):
+    path = _xml(tmp_path, [], root="metadata")
+    with pytest.raises(ValueError, match="root is <metadata>"):
+        list(read_xml_rows(path))
+
+
+def test_xml_rejects_malformed_xml(tmp_path):
+    path = tmp_path / "broken.xml"
+    path.write_text("<annotations><annotation id='1'")
+    with pytest.raises(ValueError, match="not well-formed"):
+        list(read_xml_rows(path))
+
+
+def test_xml_rejects_an_annotation_missing_a_time(tmp_path):
+    path = tmp_path / "short.xml"
+    path.write_text(
+        '<annotations><annotation id="1" type="T" description="T" '
+        'startOffsetUsecs="5"/></annotations>'
+    )
+    with pytest.raises(ValueError, match="missing attributes"):
+        list(read_xml_rows(path))
+
+
+def test_read_export_routes_by_suffix(tmp_path):
+    csv_path = _csv(tmp_path, ["1,L,T,,Review,2022-11-09 02:12:31,500,0,C3"])
+    xml_path = _xml(tmp_path, [("1", "T", "T", 500, 500)])
+    assert list(read_export(csv_path))[0].channel == "C3"
+    assert list(read_export(xml_path))[0].channel == ""
+    with pytest.raises(ValueError, match="neither"):
+        list(read_export(tmp_path / "notes.txt"))
+
+
+def test_convert_turns_the_xml_export_into_one_whole_recording_layer(tmp_path):
+    path = _xml(
+        tmp_path,
+        [
+            ("1", "+0.000000", "+0.000000", 0, 0),
+            ("2", "IMP CHECK ON", "IMP CHECK ON", 16320000, 16320000),
+            ("3", "IMP CHECK OFF", "IMP CHECK OFF", 20160000, 20160000),
+        ],
+    )
+    ((header, marks),) = convert(path, json_bodies=True)
+    assert header.id == "edf-annotations"
+    assert header.name == "EDF Annotations"
+    assert header.provenance["extractor"] == "ieeg-annotations-xml"
+    assert [mark.label for mark in marks] == ["IMP CHECK ON", "IMP CHECK OFF"]
+    assert all(mark.channels == () for mark in marks)
+    assert marks[0].body == {
+        "description": "IMP CHECK ON",
+        "ts_annotation_id": "2",
+    }

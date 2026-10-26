@@ -34,8 +34,9 @@ inputs:
     dataType: file
     required: true
     description: >-
-      One or more CSV exports in INPUT_DIR. Every *.csv is read; the SITE
-      setting decides which reader interprets them.
+      One or more annotation exports in INPUT_DIR. Every *.csv and *.xml is
+      read; the SITE setting decides which reader interprets them. Other
+      files beside them are ignored.
 
 outputs:
   - name: annotations_ndjson
@@ -51,7 +52,8 @@ parameters:
     label: Source site
     description: >-
       Which site's export rules to apply. Each site knows the quirks of one
-      source; everything downstream of it is identical.
+      source and the file formats it exports; everything downstream of it is
+      identical. ieeg reads the portal's CSV and XML exports.
     type: enum
     allowedValues:
       - ieeg

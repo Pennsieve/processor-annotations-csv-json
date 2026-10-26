@@ -1,8 +1,12 @@
-"""Site rules for the IEEG portal's annotation export.
+"""Site rules for the IEEG portal's annotation exports.
 
-The export is one row per annotation-channel pair, which is how
-ts_annotation_time_series stores the link. Two things have to happen before it
-is an annotation stream:
+The portal exports annotations two ways and this module reads both. The CSV
+export is one row per annotation-channel pair, which is how
+ts_annotation_time_series stores the link. The XML export is one element per
+annotation with the ts_annotation columns as attributes and no channel link at
+all. Both become the same rows, and from there on nothing cares which file
+they came from. Two things have to happen before the rows are an annotation
+stream:
 
 **Squash.** A mark on 68 channels arrives as 68 rows carrying the same
 ts_annotation_id, timestamp and text. They are one annotation with 68 channels,
@@ -23,6 +27,8 @@ vanished from an annotation is neither.
 
 import csv
 import logging
+import re
+import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,12 +45,23 @@ from processor.records import (
 
 log = logging.getLogger(__name__)
 
-EXTRACTOR = "ieeg-annotations-csv"
-VERSION = "1.0.0"
+EXTRACTOR = "ieeg-annotations"
+VERSION = "1.1.0"
 
 REQUIRED_COLUMNS = frozenset(
     {"annotation_id", "layer", "type", "time_us", "duration_us", "channel"}
 )
+
+XML_ROOT = "annotations"
+XML_ELEMENT = "annotation"
+XML_REQUIRED_ATTRIBUTES = frozenset(
+    {"id", "type", "startOffsetUsecs", "endOffsetUsecs"}
+)
+
+# An EDF+ file carries one timekeeping stamp per data record, "+1.640000" for
+# the record starting 1.64 s in. The portal exports them as annotations. They
+# say nothing a reviewer wants to see.
+TIMEKEEPING = re.compile(r"^[+-]\d+(\.\d+)?$")
 
 EXACT = "exact"
 FIRST = "first"
@@ -95,6 +112,97 @@ def read_rows(path: Path) -> Iterator[Row]:
                 duration_us=int(line["duration_us"] or 0),
                 channel=(line["channel"] or "").strip(),
             )
+
+
+def read_xml_rows(path: Path) -> Iterator[Row]:
+    """Yield the portal's XML export as rows, one per annotation.
+
+    The file is one <annotations> element holding one <annotation> per mark,
+    with the ts_annotation columns as attributes: id, layer, type,
+    description, startOffsetUsecs, endOffsetUsecs. The offsets already count
+    microseconds from the recording onset. No channel link travels in this
+    export, so every mark applies to the whole recording.
+
+    EDF+ timekeeping stamps, whose type is a bare signed number of seconds
+    with no description of its own, are dropped and counted in the log.
+
+    Raises ValueError for a file that is not well-formed XML, whose root is
+    not <annotations>, or whose annotation lacks a required attribute. A
+    missing attribute is raised rather than defaulted because a missing time
+    is not zero.
+    """
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as error:
+        raise ValueError(
+            f"{path.name} is not well-formed XML: {error}"
+        ) from error
+    if root.tag != XML_ROOT:
+        raise ValueError(
+            f"{path.name} is not an annotation export; its root is "
+            f"<{root.tag}>, expected <{XML_ROOT}>"
+        )
+
+    dropped = 0
+    for element in root.iter(XML_ELEMENT):
+        missing = XML_REQUIRED_ATTRIBUTES - element.attrib.keys()
+        if missing:
+            raise ValueError(
+                f"{path.name}: an {XML_ELEMENT} is missing attributes "
+                f"{sorted(missing)}; it has {sorted(element.attrib)}"
+            )
+        kind = element.get("type", "").strip()
+        description = element.get("description", "").strip()
+        if TIMEKEEPING.match(kind) and description in ("", kind):
+            dropped += 1
+            continue
+        if len(element):
+            log.warning(
+                "%s: annotation %s has child elements %s, which this reader "
+                "does not use",
+                path.name,
+                element.get("id"),
+                sorted({child.tag for child in element}),
+            )
+        start_us = int(element.get("startOffsetUsecs", ""))
+        end_us = int(element.get("endOffsetUsecs", ""))
+        if end_us < start_us:
+            log.warning(
+                "%s: annotation %s ends %d us before it starts; written as a "
+                "point event",
+                path.name,
+                element.get("id"),
+                start_us - end_us,
+            )
+        yield Row(
+            annotation_id=element.get("id", ""),
+            layer=element.get("layer", "").strip(),
+            type=kind,
+            description=description,
+            annotator=element.get("annotator", "").strip(),
+            created_at=element.get("createTime", "").strip(),
+            time_us=start_us,
+            duration_us=max(0, end_us - start_us),
+            channel="",
+        )
+    if dropped:
+        log.info("%s: dropped %d EDF+ timekeeping stamps", path.name, dropped)
+
+
+def read_export(path: Path) -> Iterator[Row]:
+    """Yield the rows of a CSV or an XML export, by the file's suffix.
+
+    Raises ValueError for any other suffix, naming the file.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return read_rows(path)
+    if suffix == ".xml":
+        return read_xml_rows(path)
+    raise ValueError(
+        f"{path.name} is neither a .csv nor an .xml export; "
+        "the IEEG site reads those two"
+    )
 
 
 def squash(rows: Iterable[Row]) -> list[Mark]:
@@ -245,9 +353,9 @@ def convert(
     json_bodies: bool = False,
     source_prefix: str = "",
 ) -> list[tuple[ChannelHeader, list[Mark]]]:
-    """Turn one exported CSV into one annotation source per layer.
+    """Turn one exported CSV or XML file into one annotation source per layer.
 
-    1. Read the rows.
+    1. Read the rows, by the file's suffix.
     2. Squash the per-channel fan-out into one mark per annotation.
     3. Drop repeated imports.
     4. Split by layer, since a layer is the grouping a reviewer already thinks
@@ -257,7 +365,7 @@ def convert(
     whole workflow run, and two sites with a layer called "Seizures" would
     otherwise collide and fail the merge.
     """
-    rows = list(read_rows(path))
+    rows = list(read_export(path))
     by_layer: dict[str, list[Row]] = {}
     for row in rows:
         by_layer.setdefault(row.layer, []).append(row)
@@ -285,7 +393,7 @@ def convert(
                 JSON_MEDIA_TYPE if json_bodies else TEXT_MEDIA_TYPE
             ),
             provenance={
-                "extractor": EXTRACTOR,
+                "extractor": f"{EXTRACTOR}-{path.suffix.lower().lstrip('.')}",
                 "version": VERSION,
                 "source_file": path.name,
                 "extracted_at": utc_now(),

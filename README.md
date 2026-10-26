@@ -35,7 +35,7 @@ make run           # build and run through docker-compose
 INPUT_DIR=data/input OUTPUT_DIR=data/output python3 -m processor.main
 ```
 
-Every `*.csv` in `INPUT_DIR` is read. Stdlib only, no dependencies.
+Every `*.csv` and `*.xml` in `INPUT_DIR` is read. Stdlib only, no dependencies.
 
 | Variable | Governs | Default |
 |---|---|---|
@@ -102,6 +102,21 @@ Measured output:
 hup247.csv    400 rows -> 6 marks -> 3 after dedupe   (1 layer, one mark kept twice)
 hup138.csv    600 rows -> 5 marks -> 5 after dedupe   (1 layer, real durations)
 ```
+
+### The XML export
+
+The portal also exports a layer as XML: one `<annotations>` root holding one
+`<annotation>` element per mark, with the same `ts_annotation` columns as
+attributes (`id`, `layer`, `type`, `description`, `startOffsetUsecs`,
+`endOffsetUsecs`). The offsets are already microseconds from the recording
+onset. The export carries no channel link, so every mark applies to the whole
+recording. A `.xml` in `INPUT_DIR` goes through the same squash, dedupe and
+layer split as the CSV.
+
+One thing is dropped on the way: an EDF+ recording carries a timekeeping stamp
+per data record (`+1.640000`), and the portal exports those as annotations.
+They are recognised by their shape, a bare signed number of seconds with no
+description of its own, and counted in the log rather than written.
 
 ### Two mapping decisions worth knowing
 
